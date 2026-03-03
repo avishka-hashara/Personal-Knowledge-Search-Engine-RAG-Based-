@@ -1,0 +1,5 @@
+The project aims to design a smart irrigation system that uses soil moisture sensors and weather data to optimize water usage.
+A small team of engineers and environmental scientists collaborates to integrate IoT devices with a mobile app for real-time monitoring.
+The system is tested in community gardens to measure efficiency improvements compared to traditional watering methods.
+Early results show a 30% reduction in water consumption while maintaining healthy crop growth.
+The long-term goal is to scale the solution for use in larger agricultural fields, promoting sustainable farming practices.
