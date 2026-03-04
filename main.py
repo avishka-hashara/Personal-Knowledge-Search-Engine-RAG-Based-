@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 # --- NEW IMPORTS FOR CHUNKING AND EMBEDDING ---
 from langchain_community.document_loaders import TextLoader
@@ -113,3 +114,60 @@ async def process_documents():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+
+
+# --- NEW: Data Model for the Request ---
+class QueryRequest(BaseModel):
+    query: str
+
+# --- NEW: The RAG Query Endpoint ---
+@app.post("/query")
+async def query_knowledge(request: QueryRequest):
+    try:
+        # 1. Load our local database and embedding model
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+        
+        # 2. Search the database for the top 3 most relevant chunks
+        relevant_docs = vectorstore.similarity_search(request.query, k=3)
+        
+        if not relevant_docs:
+            return {"answer": "I couldn't find any relevant information in your documents.", "sources": []}
+            
+        # 3. Combine the retrieved chunks into one big string of context
+        context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
+        
+        # 4. Construct the prompt for OpenRouter
+        prompt = f"""
+        You are a highly intelligent personal knowledge assistant. 
+        Use the following pieces of retrieved context from my personal notes to answer my question.
+        If you don't know the answer based on the context, just say "I don't have that in my notes." Do not make things up.
+
+        Context:
+        {context_text}
+
+        Question:
+        {request.query}
+
+        Answer:
+        """
+        
+        # 5. Send it to the LLM!
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            model="openai/gpt-oss-120b",
+        )
+        
+        response = llm.invoke(prompt)
+        
+        # Return the AI's answer, plus the exact source chunks it used
+        return {
+            "query": request.query,
+            "answer": response.content,
+            "sources": [doc.page_content for doc in relevant_docs]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error querying knowledge base: {str(e)}")
