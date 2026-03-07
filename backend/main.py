@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from typing import List, Optional
 from langchain_openai import ChatOpenAI
 
 from langchain_community.document_loaders import TextLoader
@@ -15,7 +16,7 @@ load_dotenv()
 
 app = FastAPI(
     title="Personal Knowledge Engine API",
-    description="Backend for the RAG-based personal search engine"
+    description="Backend for the RAG-based personal search engine with memory"
 )
 
 app.add_middleware(
@@ -26,8 +27,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- NEW: Data Models for Conversation History ---
+class Message(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
 class QueryRequest(BaseModel):
     query: str
+    history: List[Message] = []  # Defaults to an empty list for the first question
 
 @app.get("/")
 async def root():
@@ -84,18 +91,15 @@ async def process_documents():
     all_documents = []
     
     try:
-        # --- NEW: Loop through ALL files and force UTF-8 encoding ---
         for file_name in txt_files:
             file_path = os.path.join(data_dir, file_name)
-            loader = TextLoader(file_path, encoding="utf-8") # Forces Python to read special characters correctly
+            loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
             all_documents.extend(documents)
         
-        # Chop all documents into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = text_splitter.split_documents(all_documents)
         
-        # Embed and save
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.from_documents(documents=chunks, embedding=embeddings)
         vectorstore.save_local("./faiss_db")
@@ -112,24 +116,40 @@ async def process_documents():
 async def query_knowledge(request: QueryRequest):
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
         vectorstore = FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
+        
+        # 1. Search the database
         relevant_docs = vectorstore.similarity_search(request.query, k=3)
         
         if not relevant_docs:
-            return {"answer": "I couldn't find any relevant information in your documents.", "sources": []}
+             # Even if no docs are found, we still want to answer based on history if possible
+            context_text = "No direct context found in documents."
+        else:
+            context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
             
-        context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
-        
+        # 2. Format the conversation history (grabbing only the last 4 messages so we don't overload the prompt)
+        history_text = ""
+        if request.history:
+            recent_history = request.history[-4:] 
+            for msg in recent_history:
+                role = "Human" if msg.role == "user" else "Assistant"
+                history_text += f"{role}: {msg.content}\n"
+        else:
+            history_text = "No previous conversation."
+
+        # 3. Inject BOTH Context AND History into the Prompt
         prompt = f"""
         You are a highly intelligent personal knowledge assistant. 
-        Use the following pieces of retrieved context from my personal notes to answer my question.
-        If you don't know the answer based on the context, just say "I don't have that in my notes." Do not make things up.
+        Use the following pieces of retrieved context from my personal notes AND our recent conversation history to answer my question.
+        If you don't know the answer based on the context or history, just say "I don't have that in my notes." Do not make things up.
 
-        Context:
+        Conversation History:
+        {history_text}
+
+        Retrieved Context:
         {context_text}
 
-        Question:
+        Current Question:
         {request.query}
 
         Answer:
@@ -147,7 +167,7 @@ async def query_knowledge(request: QueryRequest):
         return {
             "query": request.query,
             "answer": response.content,
-            "sources": [doc.page_content for doc in relevant_docs]
+            "sources": [doc.page_content for doc in relevant_docs] if relevant_docs else []
         }
         
     except Exception as e:
