@@ -15,7 +15,6 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
 from google_auth_oauthlib.flow import Flow
-# --- NEW: Google Drive API Imports ---
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
@@ -43,6 +42,10 @@ class Message(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     history: List[Message] = []
+
+# --- NEW: Request model for importing specific files ---
+class DriveImportRequest(BaseModel):
+    file_ids: List[str]
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
@@ -85,56 +88,64 @@ async def google_callback(request: Request):
         flow.fetch_token(authorization_response=authorization_response)
         credentials = flow.credentials
         
-        # --- NEW: Save the VIP access token into memory so our new endpoint can use it! ---
         app.state.credentials = credentials
         
         return {
             "status": "success",
-            "message": "Successfully authenticated! You can now call /drive/ingest to import files.",
+            "message": "Successfully authenticated! You can now close this tab.",
             "token_valid": credentials.valid
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
 
-# --- NEW: Google Drive Ingestion Endpoint ---
-@app.get("/drive/ingest")
-async def ingest_from_drive():
-    # 1. Check if we logged in
+# --- NEW: 1. List files from Drive (without downloading) ---
+@app.get("/drive/list")
+async def list_drive_files():
     credentials = getattr(app.state, "credentials", None)
     if not credentials or not credentials.valid:
         raise HTTPException(status_code=401, detail="Not authenticated. Please go to /auth/google/login first.")
 
     try:
-        # 2. Connect to the Drive API
         service = build('drive', 'v3', credentials=credentials)
-
-        # 3. Search for Text files or Google Docs (Limit to 5 so we don't overwhelm the system)
+        # Fetch up to 15 recent text/doc files to let the user choose
         query = "mimeType='text/plain' or mimeType='application/vnd.google-apps.document'"
-        results = service.files().list(q=query, pageSize=5, fields="files(id, name, mimeType)").execute()
+        results = service.files().list(q=query, pageSize=15, fields="files(id, name, mimeType)").execute()
         items = results.get('files', [])
 
-        if not items:
-            return {"status": "success", "message": "No text documents found in your Drive."}
+        return {"status": "success", "files": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch file list: {str(e)}")
 
+
+# --- NEW: 2. Download and process ONLY the selected files ---
+@app.post("/drive/import")
+async def import_selected_drive_files(request_data: DriveImportRequest):
+    credentials = getattr(app.state, "credentials", None)
+    if not credentials or not credentials.valid:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    if not request_data.file_ids:
+        raise HTTPException(status_code=400, detail="No files selected.")
+
+    try:
+        service = build('drive', 'v3', credentials=credentials)
         os.makedirs("data", exist_ok=True)
         downloaded_files = []
 
-        # 4. Download each file
-        for item in items:
-            file_id = item['id']
-            file_name = item['name']
-            mime_type = item['mimeType']
+        # Download each selected file
+        for file_id in request_data.file_ids:
+            # First, get the file metadata to know its name and type
+            file_meta = service.files().get(fileId=file_id, fields="name, mimeType").execute()
+            file_name = file_meta['name']
+            mime_type = file_meta['mimeType']
             
-            # Clean up the filename to avoid saving issues
             safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip() + ".txt"
             file_path = os.path.join("data", safe_name)
 
             request = None
             if mime_type == 'application/vnd.google-apps.document':
-                # Google Docs need to be explicitly exported as text
                 request = service.files().export_media(fileId=file_id, mimeType='text/plain')
             else:
-                # Regular text files can just be downloaded
                 request = service.files().get_media(fileId=file_id)
 
             fh = io.FileIO(file_path, 'wb')
@@ -145,17 +156,17 @@ async def ingest_from_drive():
             
             downloaded_files.append(safe_name)
 
-        # 5. Automatically trigger the RAG processing pipeline!
+        # Trigger RAG processing
         await process_documents()
 
         return {
             "status": "success",
-            "message": f"Downloaded and processed {len(downloaded_files)} files from Google Drive!",
+            "message": f"Successfully imported and processed {len(downloaded_files)} files!",
             "files": downloaded_files
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch from Drive: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to import files: {str(e)}")
 
 
 # --- Existing Endpoints Below ---
