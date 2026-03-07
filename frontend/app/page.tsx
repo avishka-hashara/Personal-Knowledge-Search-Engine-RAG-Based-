@@ -21,7 +21,6 @@ export default function Home() {
     setSources([]);
 
     try {
-      // UPDATED to localhost
       const res = await fetch('http://localhost:8000/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -53,26 +52,36 @@ export default function Home() {
     formData.append('file', file);
 
     try {
-      // 1. Upload to backend (UPDATED to localhost)
+      // 1. Upload to backend
       const uploadRes = await fetch('http://localhost:8000/upload', {
         method: 'POST',
         body: formData,
       });
-      if (!uploadRes.ok) throw new Error('Upload failed');
+
+      if (!uploadRes.ok) {
+        const errData = await uploadRes.json().catch(() => ({}));
+        throw new Error(`Upload Error: ${errData.detail || uploadRes.statusText}`);
+      }
 
       setUploadStatus('Processing into vector database...');
 
-      // 2. Trigger the embedding process (UPDATED to localhost)
+      // 2. Trigger the embedding process
       const processRes = await fetch('http://localhost:8000/process', {
         method: 'POST',
       });
-      if (!processRes.ok) throw new Error('Processing failed');
+
+      if (!processRes.ok) {
+        // We now catch the EXACT error from FastAPI
+        const errData = await processRes.json().catch(() => ({}));
+        throw new Error(`Backend Error: ${errData.detail || processRes.statusText}`);
+      }
 
       setUploadStatus('Success! File is now searchable.');
       setFile(null); // Clear the file input
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      setUploadStatus('Error connecting to backend. Is your FastAPI server running?');
+      // Display the specific error message on the UI
+      setUploadStatus(error.message || 'Error connecting to backend.');
     }
   };
 
@@ -98,13 +107,17 @@ export default function Home() {
             />
             <button
               type="submit"
-              disabled={!file}
+              disabled={!file || uploadStatus === 'Uploading...' || uploadStatus === 'Processing into vector database...'}
               className="bg-green-600 text-white px-6 py-2 rounded-full font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
             >
               Upload & Process
             </button>
           </form>
-          {uploadStatus && <p className="mt-3 text-sm font-medium text-gray-600">{uploadStatus}</p>}
+          {uploadStatus && (
+            <p className={`mt-3 text-sm font-medium ${uploadStatus.includes('Error') ? 'text-red-600' : 'text-gray-600'}`}>
+              {uploadStatus}
+            </p>
+          )}
         </section>
 
         {/* Search Section */}

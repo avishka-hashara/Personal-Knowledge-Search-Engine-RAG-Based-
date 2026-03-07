@@ -3,14 +3,13 @@ import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
 
-# --- NEW IMPORTS FOR CHUNKING AND EMBEDDING ---
 from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 
 load_dotenv()
 
@@ -26,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class QueryRequest(BaseModel):
+    query: str
 
 @app.get("/")
 async def root():
@@ -43,7 +45,6 @@ async def root():
         return {"status": "success", "openrouter_status": "Connected", "llm": response.content}
     except Exception as e:
          return {"status": "error", "message": str(e)}
-
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -69,75 +70,57 @@ async def upload_document(file: UploadFile = File(...)):
         "message": "File uploaded successfully and is ready for processing!"
     }
 
-# --- NEW: Document Processing Endpoint ---
 @app.post("/process")
 async def process_documents():
     data_dir = "data"
     
-    # 1. Check if we have files
     if not os.path.exists(data_dir) or not os.listdir(data_dir):
         raise HTTPException(status_code=404, detail="No files found in the data folder to process.")
     
-    # Let's grab the first .txt file we find for our MVP
     txt_files = [f for f in os.listdir(data_dir) if f.endswith(".txt")]
     if not txt_files:
         raise HTTPException(status_code=404, detail="No .txt files found to process.")
         
-    file_path = os.path.join(data_dir, txt_files[0])
+    all_documents = []
     
     try:
-        # 2. Load the document
-        loader = TextLoader(file_path)
-        documents = loader.load()
+        # --- NEW: Loop through ALL files and force UTF-8 encoding ---
+        for file_name in txt_files:
+            file_path = os.path.join(data_dir, file_name)
+            loader = TextLoader(file_path, encoding="utf-8") # Forces Python to read special characters correctly
+            documents = loader.load()
+            all_documents.extend(documents)
         
-        # 3. Chop it into chunks of 500 characters, with 50 characters of overlap
-        # (Overlap ensures we don't accidentally cut a sentence in half and lose meaning)
+        # Chop all documents into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = text_splitter.split_documents(documents)
+        chunks = text_splitter.split_documents(all_documents)
         
-        # 4. Embed and store in ChromaDB locally
-        # Note: The first time this runs, it will download the small embedding model (about 80MB)
+        # Embed and save
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Save the vectors to a local folder called 'chroma_db'
-        vectorstore = Chroma.from_documents(
-            documents=chunks, 
-            embedding=embeddings, 
-            persist_directory="./chroma_db"
-        )
-        vectorstore.persist()
+        vectorstore = FAISS.from_documents(documents=chunks, embedding=embeddings)
+        vectorstore.save_local("./faiss_db")
         
         return {
             "status": "success", 
-            "message": f"Successfully processed {txt_files[0]}",
+            "message": f"Successfully processed {len(txt_files)} file(s)",
             "chunks_created": len(chunks)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
 
-
-# --- NEW: Data Model for the Request ---
-class QueryRequest(BaseModel):
-    query: str
-
-# --- NEW: The RAG Query Endpoint ---
 @app.post("/query")
 async def query_knowledge(request: QueryRequest):
     try:
-        # 1. Load our local database and embedding model
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
         
-        # 2. Search the database for the top 3 most relevant chunks
+        vectorstore = FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
         relevant_docs = vectorstore.similarity_search(request.query, k=3)
         
         if not relevant_docs:
             return {"answer": "I couldn't find any relevant information in your documents.", "sources": []}
             
-        # 3. Combine the retrieved chunks into one big string of context
         context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
         
-        # 4. Construct the prompt for OpenRouter
         prompt = f"""
         You are a highly intelligent personal knowledge assistant. 
         Use the following pieces of retrieved context from my personal notes to answer my question.
@@ -152,7 +135,6 @@ async def query_knowledge(request: QueryRequest):
         Answer:
         """
         
-        # 5. Send it to the LLM!
         api_key = os.getenv("OPENROUTER_API_KEY")
         llm = ChatOpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -162,7 +144,6 @@ async def query_knowledge(request: QueryRequest):
         
         response = llm.invoke(prompt)
         
-        # Return the AI's answer, plus the exact source chunks it used
         return {
             "query": request.query,
             "answer": response.content,
