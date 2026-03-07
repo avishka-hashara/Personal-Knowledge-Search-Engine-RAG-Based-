@@ -1,6 +1,8 @@
 import os
 import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import io
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -12,11 +14,18 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
+from google_auth_oauthlib.flow import Flow
+# --- NEW: Google Drive API Imports ---
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+
 load_dotenv()
+
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = FastAPI(
     title="Personal Knowledge Engine API",
-    description="Backend for the RAG-based personal search engine with memory"
+    description="Backend for the RAG-based personal search engine with memory and Google Drive"
 )
 
 app.add_middleware(
@@ -27,14 +36,129 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NEW: Data Models for Conversation History ---
 class Message(BaseModel):
-    role: str  # "user" or "assistant"
+    role: str
     content: str
 
 class QueryRequest(BaseModel):
     query: str
-    history: List[Message] = []  # Defaults to an empty list for the first question
+    history: List[Message] = []
+
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+def get_google_flow():
+    client_config = {
+        "web": {
+            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "project_id": "knowledge-engine",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET")
+        }
+    }
+    
+    return Flow.from_client_config(
+        client_config,
+        scopes=SCOPES,
+        redirect_uri="http://localhost:8000/auth/google/callback"
+    )
+
+@app.get("/auth/google/login")
+async def google_login():
+    flow = get_google_flow()
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true'
+    )
+    app.state.oauth_state = state
+    app.state.code_verifier = flow.code_verifier
+    return RedirectResponse(url=authorization_url)
+
+@app.get("/auth/google/callback")
+async def google_callback(request: Request):
+    try:
+        flow = get_google_flow()
+        flow.code_verifier = getattr(app.state, "code_verifier", None)
+        
+        authorization_response = str(request.url)
+        flow.fetch_token(authorization_response=authorization_response)
+        credentials = flow.credentials
+        
+        # --- NEW: Save the VIP access token into memory so our new endpoint can use it! ---
+        app.state.credentials = credentials
+        
+        return {
+            "status": "success",
+            "message": "Successfully authenticated! You can now call /drive/ingest to import files.",
+            "token_valid": credentials.valid
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
+
+# --- NEW: Google Drive Ingestion Endpoint ---
+@app.get("/drive/ingest")
+async def ingest_from_drive():
+    # 1. Check if we logged in
+    credentials = getattr(app.state, "credentials", None)
+    if not credentials or not credentials.valid:
+        raise HTTPException(status_code=401, detail="Not authenticated. Please go to /auth/google/login first.")
+
+    try:
+        # 2. Connect to the Drive API
+        service = build('drive', 'v3', credentials=credentials)
+
+        # 3. Search for Text files or Google Docs (Limit to 5 so we don't overwhelm the system)
+        query = "mimeType='text/plain' or mimeType='application/vnd.google-apps.document'"
+        results = service.files().list(q=query, pageSize=5, fields="files(id, name, mimeType)").execute()
+        items = results.get('files', [])
+
+        if not items:
+            return {"status": "success", "message": "No text documents found in your Drive."}
+
+        os.makedirs("data", exist_ok=True)
+        downloaded_files = []
+
+        # 4. Download each file
+        for item in items:
+            file_id = item['id']
+            file_name = item['name']
+            mime_type = item['mimeType']
+            
+            # Clean up the filename to avoid saving issues
+            safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip() + ".txt"
+            file_path = os.path.join("data", safe_name)
+
+            request = None
+            if mime_type == 'application/vnd.google-apps.document':
+                # Google Docs need to be explicitly exported as text
+                request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+            else:
+                # Regular text files can just be downloaded
+                request = service.files().get_media(fileId=file_id)
+
+            fh = io.FileIO(file_path, 'wb')
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            
+            downloaded_files.append(safe_name)
+
+        # 5. Automatically trigger the RAG processing pipeline!
+        await process_documents()
+
+        return {
+            "status": "success",
+            "message": f"Downloaded and processed {len(downloaded_files)} files from Google Drive!",
+            "files": downloaded_files
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch from Drive: {str(e)}")
+
+
+# --- Existing Endpoints Below ---
 
 @app.get("/")
 async def root():
@@ -118,16 +242,13 @@ async def query_knowledge(request: QueryRequest):
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
         
-        # 1. Search the database
         relevant_docs = vectorstore.similarity_search(request.query, k=3)
         
         if not relevant_docs:
-             # Even if no docs are found, we still want to answer based on history if possible
             context_text = "No direct context found in documents."
         else:
             context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
             
-        # 2. Format the conversation history (grabbing only the last 4 messages so we don't overload the prompt)
         history_text = ""
         if request.history:
             recent_history = request.history[-4:] 
@@ -137,7 +258,6 @@ async def query_knowledge(request: QueryRequest):
         else:
             history_text = "No previous conversation."
 
-        # 3. Inject BOTH Context AND History into the Prompt
         prompt = f"""
         You are a highly intelligent personal knowledge assistant. 
         Use the following pieces of retrieved context from my personal notes AND our recent conversation history to answer my question.

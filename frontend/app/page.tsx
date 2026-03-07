@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect } from 'react';
 
-// Define the shape of our chat messages
 type Message = {
   role: 'user' | 'assistant';
   content: string;
@@ -19,7 +18,9 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState('');
 
-  // Ref to handle auto-scrolling to the bottom of the chat
+  // NEW: State for Google Drive
+  const [driveStatus, setDriveStatus] = useState('');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -30,22 +31,19 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  // Handle asking the AI a question
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
 
     const userQuery = input;
-    setInput(''); // Clear the input box immediately
+    setInput('');
 
-    // Add user's message to the chat UI
     setMessages((prev) => [...prev, { role: 'user', content: userQuery }]);
     setIsLoading(true);
 
     try {
-      // Format the history for the backend (excluding the current query we just added)
       const historyForBackend = messages
-        .filter(m => m.content !== 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?') // Ignore the greeting
+        .filter(m => m.content !== 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?')
         .map((m) => ({
           role: m.role,
           content: m.content
@@ -66,7 +64,6 @@ export default function Home() {
 
       const data = await res.json();
 
-      // Add the AI's response to the chat UI
       setMessages((prev) => [...prev, {
         role: 'assistant',
         content: data.answer,
@@ -84,7 +81,6 @@ export default function Home() {
     }
   };
 
-  // Handle uploading and processing a new document
   const handleFileUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
@@ -123,19 +119,42 @@ export default function Home() {
     }
   };
 
+  // --- NEW: Handle Google Drive Sync ---
+  const handleDriveSync = async () => {
+    setDriveStatus('Connecting to Google Drive and downloading files...');
+    try {
+      const res = await fetch('http://localhost:8000/drive/ingest');
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error('Please click "Authenticate" first!');
+        }
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(`Sync Error: ${errData.detail || res.statusText}`);
+      }
+
+      const data = await res.json();
+      setDriveStatus(`Success! Synced ${data.files?.length || 0} files to your knowledge base.`);
+    } catch (error: any) {
+      console.error(error);
+      setDriveStatus(error.message || 'Error syncing from Drive.');
+    }
+  };
+
   return (
     <main className="min-h-screen bg-gray-50 flex flex-col items-center p-4 md:p-8 text-gray-900">
       <div className="w-full max-w-5xl flex flex-col md:flex-row gap-6 h-[90vh]">
 
-        {/* Left Sidebar: Upload Controls */}
-        <div className="w-full md:w-1/3 flex flex-col gap-6">
+        {/* Left Sidebar */}
+        <div className="w-full md:w-1/3 flex flex-col gap-6 overflow-y-auto pr-2">
           <header>
             <h1 className="text-3xl font-bold text-blue-600">Knowledge Engine</h1>
             <p className="text-gray-500 mt-1 text-sm">Conversational RAG Search</p>
           </header>
 
+          {/* Local Upload Section */}
           <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-            <h2 className="text-lg font-semibold mb-4">Add Documents</h2>
+            <h2 className="text-lg font-semibold mb-4">Local Upload</h2>
             <form onSubmit={handleFileUpload} className="flex flex-col gap-4">
               <input
                 type="file"
@@ -157,12 +176,47 @@ export default function Home() {
               </p>
             )}
           </section>
+
+          {/* NEW: Google Drive Section */}
+          <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+            <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500"><path d="M10.3 3.1 3 15.8h7.4l7.3-12.7H10.3Z" /><path d="m14 3.1-7.4 12.7 3.7 6.3 7.4-12.7L14 3.1Z" /><path d="m17.7 9.5-3.7-6.4H3l3.7 6.4h11Z" /></svg>
+              Google Drive Integration
+            </h2>
+            <p className="text-sm text-gray-500 mb-4">Sync your latest 5 text documents directly from the cloud.</p>
+
+            <div className="flex flex-col gap-3">
+              {/* This opens a new tab so we don't lose our chat state! */}
+              <a
+                href="http://localhost:8000/auth/google/login"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="bg-white border-2 border-blue-600 text-blue-600 px-6 py-2 rounded-lg font-medium hover:bg-blue-50 transition-colors w-full text-center"
+              >
+                1. Authenticate Account
+              </a>
+
+              <button
+                onClick={handleDriveSync}
+                disabled={driveStatus.includes('Connecting')}
+                className="bg-blue-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors w-full"
+              >
+                2. Sync Drive Files
+              </button>
+            </div>
+
+            {driveStatus && (
+              <p className={`mt-3 text-sm font-medium ${driveStatus.includes('Error') || driveStatus.includes('Please click') ? 'text-red-600' : 'text-green-600'}`}>
+                {driveStatus}
+              </p>
+            )}
+          </section>
+
         </div>
 
         {/* Right Area: Chat Interface */}
         <div className="w-full md:w-2/3 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
 
-          {/* Chat History */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gray-50/50">
             {messages.map((msg, index) => (
               <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -172,7 +226,6 @@ export default function Home() {
                   }`}>
                   <p className="whitespace-pre-wrap">{msg.content}</p>
 
-                  {/* Sources Dropdown (Only show if sources exist and it's an assistant message) */}
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="mt-4 pt-4 border-t border-gray-100">
                       <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Sources</p>
@@ -200,7 +253,6 @@ export default function Home() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Chat Input Area */}
           <div className="p-4 bg-white border-t border-gray-200">
             <form onSubmit={handleSend} className="flex gap-3">
               <input
