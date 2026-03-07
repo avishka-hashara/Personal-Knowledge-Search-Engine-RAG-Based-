@@ -8,6 +8,12 @@ type Message = {
   sources?: string[];
 };
 
+type DriveFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     { role: 'assistant', content: 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?' }
@@ -18,8 +24,10 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState('');
 
-  // NEW: State for Google Drive
+  // NEW: State for the Google Drive file selector
   const [driveStatus, setDriveStatus] = useState('');
+  const [availableDriveFiles, setAvailableDriveFiles] = useState<DriveFile[]>([]);
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -95,10 +103,7 @@ export default function Home() {
         body: formData,
       });
 
-      if (!uploadRes.ok) {
-        const errData = await uploadRes.json().catch(() => ({}));
-        throw new Error(`Upload Error: ${errData.detail || uploadRes.statusText}`);
-      }
+      if (!uploadRes.ok) throw new Error('Upload Error');
 
       setUploadStatus('Processing into vector database...');
 
@@ -106,38 +111,65 @@ export default function Home() {
         method: 'POST',
       });
 
-      if (!processRes.ok) {
-        const errData = await processRes.json().catch(() => ({}));
-        throw new Error(`Backend Error: ${errData.detail || processRes.statusText}`);
-      }
+      if (!processRes.ok) throw new Error('Backend Error');
 
       setUploadStatus('Success! File is now searchable.');
       setFile(null);
     } catch (error: any) {
-      console.error(error);
-      setUploadStatus(error.message || 'Error connecting to backend.');
+      setUploadStatus('Error connecting to backend.');
     }
   };
 
-  // --- NEW: Handle Google Drive Sync ---
-  const handleDriveSync = async () => {
-    setDriveStatus('Connecting to Google Drive and downloading files...');
+  // --- NEW: Step 1 - Fetch the list of files ---
+  const handleFetchDriveFiles = async () => {
+    setDriveStatus('Fetching files from Drive...');
     try {
-      const res = await fetch('http://localhost:8000/drive/ingest');
+      const res = await fetch('http://localhost:8000/drive/list');
 
       if (!res.ok) {
-        if (res.status === 401) {
-          throw new Error('Please click "Authenticate" first!');
-        }
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(`Sync Error: ${errData.detail || res.statusText}`);
+        if (res.status === 401) throw new Error('Please click "Authenticate" first!');
+        throw new Error('Failed to fetch files.');
       }
 
       const data = await res.json();
-      setDriveStatus(`Success! Synced ${data.files?.length || 0} files to your knowledge base.`);
+      setAvailableDriveFiles(data.files);
+      setDriveStatus('');
     } catch (error: any) {
-      console.error(error);
-      setDriveStatus(error.message || 'Error syncing from Drive.');
+      setDriveStatus(error.message);
+    }
+  };
+
+  // --- NEW: Step 2 - Toggle Checkboxes ---
+  const toggleFileSelection = (id: string) => {
+    const newSelection = new Set(selectedFileIds);
+    if (newSelection.has(id)) {
+      newSelection.delete(id);
+    } else {
+      newSelection.add(id);
+    }
+    setSelectedFileIds(newSelection);
+  };
+
+  // --- NEW: Step 3 - Send Selected IDs to Backend ---
+  const handleImportSelected = async () => {
+    if (selectedFileIds.size === 0) return;
+
+    setDriveStatus(`Importing and processing ${selectedFileIds.size} files...`);
+    try {
+      const res = await fetch('http://localhost:8000/drive/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_ids: Array.from(selectedFileIds) }),
+      });
+
+      if (!res.ok) throw new Error('Import failed.');
+
+      const data = await res.json();
+      setDriveStatus(`Success! Added ${data.files.length} files to your knowledge base.`);
+      setAvailableDriveFiles([]); // Clear list after successful import
+      setSelectedFileIds(new Set());
+    } catch (error: any) {
+      setDriveStatus('Error importing files.');
     }
   };
 
@@ -152,7 +184,6 @@ export default function Home() {
             <p className="text-gray-500 mt-1 text-sm">Conversational RAG Search</p>
           </header>
 
-          {/* Local Upload Section */}
           <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
             <h2 className="text-lg font-semibold mb-4">Local Upload</h2>
             <form onSubmit={handleFileUpload} className="flex flex-col gap-4">
@@ -170,23 +201,17 @@ export default function Home() {
                 Upload & Process
               </button>
             </form>
-            {uploadStatus && (
-              <p className={`mt-3 text-sm font-medium ${uploadStatus.includes('Error') ? 'text-red-600' : 'text-green-600'}`}>
-                {uploadStatus}
-              </p>
-            )}
+            {uploadStatus && <p className="mt-3 text-sm font-medium text-gray-600">{uploadStatus}</p>}
           </section>
 
-          {/* NEW: Google Drive Section */}
-          <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+          {/* UPGRADED: Google Drive Section */}
+          <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col">
             <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500"><path d="M10.3 3.1 3 15.8h7.4l7.3-12.7H10.3Z" /><path d="m14 3.1-7.4 12.7 3.7 6.3 7.4-12.7L14 3.1Z" /><path d="m17.7 9.5-3.7-6.4H3l3.7 6.4h11Z" /></svg>
-              Google Drive Integration
+              Google Drive Import
             </h2>
-            <p className="text-sm text-gray-500 mb-4">Sync your latest 5 text documents directly from the cloud.</p>
 
-            <div className="flex flex-col gap-3">
-              {/* This opens a new tab so we don't lose our chat state! */}
+            <div className="flex flex-col gap-3 mb-4">
               <a
                 href="http://localhost:8000/auth/google/login"
                 target="_blank"
@@ -197,24 +222,52 @@ export default function Home() {
               </a>
 
               <button
-                onClick={handleDriveSync}
-                disabled={driveStatus.includes('Connecting')}
-                className="bg-blue-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors w-full"
+                onClick={handleFetchDriveFiles}
+                className="bg-gray-100 text-gray-700 px-6 py-2 rounded-lg font-medium hover:bg-gray-200 transition-colors w-full"
               >
-                2. Sync Drive Files
+                2. Fetch My Files
               </button>
             </div>
 
             {driveStatus && (
-              <p className={`mt-3 text-sm font-medium ${driveStatus.includes('Error') || driveStatus.includes('Please click') ? 'text-red-600' : 'text-green-600'}`}>
+              <p className={`mb-3 text-sm font-medium ${driveStatus.includes('Error') || driveStatus.includes('Please click') ? 'text-red-600' : 'text-blue-600'}`}>
                 {driveStatus}
               </p>
+            )}
+
+            {/* The File Checklist UI */}
+            {availableDriveFiles.length > 0 && (
+              <div className="mt-2 border-t border-gray-100 pt-4 flex flex-col h-[250px]">
+                <p className="text-sm text-gray-500 mb-3 font-medium">Select files to import:</p>
+
+                <div className="flex-1 overflow-y-auto space-y-2 border border-gray-200 rounded p-2 mb-4 bg-gray-50">
+                  {availableDriveFiles.map((f) => (
+                    <label key={f.id} className="flex items-center gap-3 p-2 hover:bg-blue-50 rounded cursor-pointer transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={selectedFileIds.has(f.id)}
+                        onChange={() => toggleFileSelection(f.id)}
+                        className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-700 truncate" title={f.name}>{f.name}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <button
+                  onClick={handleImportSelected}
+                  disabled={selectedFileIds.size === 0}
+                  className="bg-blue-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors w-full"
+                >
+                  Import {selectedFileIds.size > 0 ? `(${selectedFileIds.size})` : ''} Files
+                </button>
+              </div>
             )}
           </section>
 
         </div>
 
-        {/* Right Area: Chat Interface */}
+        {/* Right Area: Chat Interface (Unchanged) */}
         <div className="w-full md:w-2/3 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
 
           <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gray-50/50">
