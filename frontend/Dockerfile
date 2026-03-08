@@ -2,11 +2,14 @@ FROM node:20
 
 WORKDIR /app
 
-# COPY ONLY package.json (Leave package-lock.json behind!)
-COPY package.json ./
+# COPY package.json and package-lock.json for reliable builds
+COPY package.json package-lock.json* ./
 
-# Run a fresh install so Linux grabs its own native Tailwind binaries
-RUN npm install && npm install @tailwindcss/oxide-linux-x64-gnu
+# Install dependencies using the lockfile
+RUN npm install
+
+# Re-install the specific Linux binary for Tailwind 4 inside the container
+RUN npm install @tailwindcss/oxide-linux-x64-gnu
 
 COPY . .
 

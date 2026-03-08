@@ -1,3 +1,49 @@
 @import "tailwindcss";
 
-/* We are keeping this incredibly clean to let Tailwind do the work */
+@theme {
+    --color-brand-blue: #2563eb;
+    --color-brand-dark: #0f172a;
+    --color-brand-surface: #1e293b;
+    --color-brand-border: rgba(255, 255, 255, 0.1);
+
+    --radius-xl: 1rem;
+    --radius-2xl: 1.5rem;
+}
+
+:root {
+    --background: #0b0f1a;
+    --foreground: #f8fafc;
+}
+
+body {
+    background: var(--background);
+    color: var(--foreground);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+@layer utilities {
+    .glass-card {
+        background: rgba(30, 41, 59, 0.4);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .glass-card-hover:hover {
+        background: rgba(30, 41, 59, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .sidebar-gradient {
+        background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+    }
+
+    .premium-shadow {
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06), inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+    }
+
+    .welcome-gradient {
+        background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+}
