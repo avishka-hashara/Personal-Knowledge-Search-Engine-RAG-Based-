@@ -16,9 +16,12 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3040:3000"
+      - "3040:3040" # Matches your host port to the container's active port
     volumes:
       - ./frontend:/app
       - /app/node_modules
+      - /app/.next
     environment:
       - CHOKIDAR_USEPOLLING=true
+      - HOSTNAME=0.0.0.0 # Forces Next.js to accept outside browser connections
+      - PORT=3040 # Ensures Next.js knows exactly which port to use
