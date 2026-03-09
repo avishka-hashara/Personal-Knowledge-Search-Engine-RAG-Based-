@@ -70,6 +70,7 @@ class Message(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     history: List[Message] = []
+    selected_doc_ids: Optional[List[str]] = None
 
 class DriveImportRequest(BaseModel):
     file_ids: List[str]
@@ -268,23 +269,69 @@ async def query_knowledge(request: QueryRequest):
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
-        relevant_docs = vectorstore.similarity_search(request.query, k=3)
         
-        context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs]) if relevant_docs else "No direct context found."
+        relevant_docs = []
+        is_doc_search = True
+
+        # Handle Document Filtering
+        if request.selected_doc_ids is not None:
+            if len(request.selected_doc_ids) == 0:
+                is_doc_search = False
+                context_text = "No documents selected."
+            else:
+                filter_func = lambda metadata: metadata.get("document_id") in request.selected_doc_ids
+                relevant_docs = vectorstore.similarity_search(request.query, k=3, filter=filter_func)
+                context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs]) if relevant_docs else "No relevant context found in the selected documents."
+        else:
+            relevant_docs = vectorstore.similarity_search(request.query, k=3)
+            context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs]) if relevant_docs else "No relevant context found."
+            
         history_text = "".join([f"{'Human' if msg.role == 'user' else 'Assistant'}: {msg.content}\n" for msg in request.history[-4:]]) if request.history else "No previous conversation."
 
-        prompt = f"""
-        You are a highly intelligent personal knowledge assistant. 
-        Use the following pieces of retrieved context from my personal notes AND our recent conversation history to answer my question.
-        If you don't know the answer based on the context or history, just say "I don't have that in my notes." Do not make things up.
+        # --- THE FIX: Strict Grounding Prompts ---
+        if is_doc_search:
+            prompt = f"""
+            You are a highly intelligent personal knowledge assistant.
 
-        Conversation History:\n{history_text}\n
-        Retrieved Context:\n{context_text}\n
-        Current Question:\n{request.query}\nAnswer:
-        """
+            Conversation History:
+            {history_text}
+
+            Retrieved Context:
+            {context_text}
+
+            Current Question:
+            {request.query}
+
+            Instructions:
+            1. Answer the Current Question strictly using ONLY the "Retrieved Context" provided above.
+            2. Use the "Conversation History" ONLY to understand the flow of the conversation (e.g., what "it" refers to). DO NOT use factual information from the Conversation History to answer the question.
+            3. If the Retrieved Context does not contain the answer, you MUST say "I don't have that in the currently selected notes." Do not invent an answer.
+            
+            Answer:
+            """
+        else:
+            prompt = f"""
+            You are a highly intelligent personal assistant.
+            
+            Conversation History:
+            {history_text}
+            
+            Current Question:
+            {request.query}
+            
+            Instructions:
+            The user has deselected all personal documents. Answer the question normally using your general knowledge and our conversation history.
+            
+            Answer:
+            """
         
         llm = ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"), model="openai/gpt-oss-120b")
         response = llm.invoke(prompt)
-        return {"query": request.query, "answer": response.content, "sources": [doc.page_content for doc in relevant_docs] if relevant_docs else []}
+        
+        return {
+            "query": request.query, 
+            "answer": response.content, 
+            "sources": [doc.page_content for doc in relevant_docs] if relevant_docs else []
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

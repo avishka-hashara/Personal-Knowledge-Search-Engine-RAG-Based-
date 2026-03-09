@@ -19,7 +19,7 @@ import {
   FolderOpen,
   Trash2,
   RefreshCw,
-  User
+  Filter // NEW ICON
 } from 'lucide-react';
 
 type Message = {
@@ -34,7 +34,6 @@ type DriveFile = {
   mimeType: string;
 };
 
-// --- NEW: Type definition for Database Documents ---
 type DocumentDB = {
   id: string;
   document_name: string;
@@ -57,9 +56,11 @@ export default function Home() {
   const [availableDriveFiles, setAvailableDriveFiles] = useState<DriveFile[]>([]);
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
 
-  // --- NEW: State for managed documents ---
   const [managedDocs, setManagedDocs] = useState<DocumentDB[]>([]);
   const [isDocsLoading, setIsDocsLoading] = useState(false);
+
+  // --- NEW: State for querying specific documents ---
+  const [activeQueryDocIds, setActiveQueryDocIds] = useState<Set<string>>(new Set());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -71,7 +72,6 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  // --- NEW: Fetch Documents on Mount ---
   useEffect(() => {
     fetchDocuments();
   }, []);
@@ -83,6 +83,9 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setManagedDocs(data.documents);
+
+        // --- NEW: Default all fetched documents to "Active" for querying ---
+        setActiveQueryDocIds(new Set(data.documents.map((d: DocumentDB) => d.id)));
       }
     } catch (error) {
       console.error("Failed to fetch documents", error);
@@ -97,11 +100,27 @@ export default function Home() {
         method: 'DELETE',
       });
       if (res.ok) {
-        fetchDocuments(); // Refresh list on success
+        fetchDocuments();
       }
     } catch (error) {
       console.error("Error deleting document", error);
     }
+  };
+
+  // --- NEW: Quick Selection Handlers ---
+  const localDocs = managedDocs.filter(d => d.source_type === 'local');
+  const driveDocs = managedDocs.filter(d => d.source_type === 'drive');
+
+  const selectAllDocs = () => setActiveQueryDocIds(new Set(managedDocs.map(d => d.id)));
+  const selectLocalDocs = () => setActiveQueryDocIds(new Set(localDocs.map(d => d.id)));
+  const selectDriveDocs = () => setActiveQueryDocIds(new Set(driveDocs.map(d => d.id)));
+  const clearSelection = () => setActiveQueryDocIds(new Set());
+
+  const toggleQueryDoc = (id: string) => {
+    const newSet = new Set(activeQueryDocIds);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setActiveQueryDocIds(newSet);
   };
 
   const handleSend = async (e: React.FormEvent) => {
@@ -127,7 +146,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: userQuery,
-          history: historyForBackend
+          history: historyForBackend,
+          selected_doc_ids: Array.from(activeQueryDocIds) // --- NEW: Pass selected IDs to backend ---
         }),
       });
 
@@ -180,7 +200,7 @@ export default function Home() {
 
       setUploadStatus('Success! File is now searchable.');
       setFile(null);
-      fetchDocuments(); // --- NEW: Refresh list after upload
+      fetchDocuments();
     } catch (error: any) {
       setUploadStatus('Error connecting to backend.');
     }
@@ -231,13 +251,12 @@ export default function Home() {
       setDriveStatus(`Success! Added ${data.files.length} files to your knowledge base.`);
       setAvailableDriveFiles([]);
       setSelectedFileIds(new Set());
-      fetchDocuments(); // --- NEW: Refresh list after import
+      fetchDocuments();
     } catch (error: any) {
       setDriveStatus('Error importing files.');
     }
   };
 
-  // --- NEW: Helper to format bytes ---
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -246,13 +265,11 @@ export default function Home() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const localDocs = managedDocs.filter(d => d.source_type === 'local');
-  const driveDocs = managedDocs.filter(d => d.source_type === 'drive');
-
   return (
     <main className="flex h-screen bg-[#0b0f1a] text-slate-200 overflow-hidden font-sans">
       {/* --- SIDEBAR --- */}
       <aside className="w-80 sidebar-gradient border-r border-white/5 flex flex-col premium-shadow z-20">
+
         {/* Logo & Header */}
         <div className="p-6 flex items-center gap-3 flex-shrink-0">
           <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center premium-shadow">
@@ -276,7 +293,7 @@ export default function Home() {
           </button>
         </nav>
 
-        {/* Scrollable Upload & Document Sections */}
+        {/* Scrollable Middle Section (Uploads & Documents) */}
         <div className="flex-1 overflow-y-auto px-4 space-y-4 custom-scrollbar pb-6">
 
           {/* Local Upload */}
@@ -372,10 +389,10 @@ export default function Home() {
             )}
           </div>
 
-          {/* --- NEW: Managed Documents Section --- */}
+          {/* --- UPGRADED: Managed Documents Section --- */}
           <div className="glass-card rounded-2xl p-5 border border-white/5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Managed Documents</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Active Documents</h2>
               <button
                 onClick={fetchDocuments}
                 className="text-slate-500 hover:text-blue-400 transition-colors p-1"
@@ -385,20 +402,34 @@ export default function Home() {
               </button>
             </div>
 
+            {managedDocs.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-4 border-b border-white/5 pb-3">
+                <button onClick={selectAllDocs} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">All</button>
+                <button onClick={selectLocalDocs} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">Local Only</button>
+                <button onClick={selectDriveDocs} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">Drive Only</button>
+                <button onClick={clearSelection} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">None</button>
+              </div>
+            )}
+
             <div className="space-y-4">
               {managedDocs.length === 0 && !isDocsLoading ? (
                 <p className="text-[11px] text-slate-500 italic text-center py-2">No documents uploaded.</p>
               ) : (
                 <>
-                  {/* Local Documents */}
                   {localDocs.length > 0 && (
                     <div className="space-y-2">
                       <h3 className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">From Local</h3>
                       {localDocs.map(doc => (
-                        <div key={doc.id} className="flex items-center justify-between p-2 rounded-lg bg-white/2 border border-white/5 hover:bg-white/5 transition-colors group">
+                        <div key={doc.id} className={`flex items-center gap-2 p-2 rounded-lg border transition-colors group ${activeQueryDocIds.has(doc.id) ? 'bg-white/[0.04] border-white/10' : 'bg-transparent border-transparent opacity-50'}`}>
+                          <input
+                            type="checkbox"
+                            checked={activeQueryDocIds.has(doc.id)}
+                            onChange={() => toggleQueryDoc(doc.id)}
+                            className="w-3.5 h-3.5 rounded border-white/20 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer"
+                          />
                           <div className="overflow-hidden pr-2 flex-1">
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
-                            <p className="text-[9px] text-slate-500">{formatBytes(doc.file_size)} • {new Date(doc.upload_date).toLocaleDateString()}</p>
+                            <p className="text-[9px] text-slate-500">{formatBytes(doc.file_size)}</p>
                           </div>
                           <button
                             onClick={() => handleDeleteDocument(doc.id)}
@@ -412,15 +443,20 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Drive Documents */}
                   {driveDocs.length > 0 && (
                     <div className="space-y-2">
                       <h3 className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">From Drive</h3>
                       {driveDocs.map(doc => (
-                        <div key={doc.id} className="flex items-center justify-between p-2 rounded-lg bg-blue-900/10 border border-blue-500/10 hover:bg-blue-900/20 transition-colors group">
+                        <div key={doc.id} className={`flex items-center gap-2 p-2 rounded-lg border transition-colors group ${activeQueryDocIds.has(doc.id) ? 'bg-blue-900/10 border-blue-500/20' : 'bg-transparent border-transparent opacity-50'}`}>
+                          <input
+                            type="checkbox"
+                            checked={activeQueryDocIds.has(doc.id)}
+                            onChange={() => toggleQueryDoc(doc.id)}
+                            className="w-3.5 h-3.5 rounded border-blue-500/30 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer"
+                          />
                           <div className="overflow-hidden pr-2 flex-1">
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
-                            <p className="text-[9px] text-blue-500/70">{formatBytes(doc.file_size)} • {new Date(doc.upload_date).toLocaleDateString()}</p>
+                            <p className="text-[9px] text-blue-500/70">{formatBytes(doc.file_size)}</p>
                           </div>
                           <button
                             onClick={() => handleDeleteDocument(doc.id)}
@@ -439,13 +475,14 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Library Footer (Fixed) */}
         <div className="mt-auto p-6 border-t border-white/5 flex items-center gap-3 bg-black/20 flex-shrink-0">
-          <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center premium-shadow">
-            <User className="w-5 h-5 text-slate-400" />
+          <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-orange-200 to-orange-400 border-2 border-white/10 overflow-hidden premium-shadow">
+            <div className="w-full h-full flex items-center justify-center text-orange-900 font-bold text-xs">AJ</div>
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-bold text-white truncate">My Account</h3>
-            <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Personal Library</p>
+            <h3 className="text-sm font-bold text-white truncate">Alex Johnson</h3>
+            <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Pro Member</p>
           </div>
           <button className="text-slate-500 hover:text-slate-200 transition-colors p-1">
             <Settings className="w-5 h-5" />
@@ -455,7 +492,6 @@ export default function Home() {
 
       {/* --- MAIN CONTENT AREA --- */}
       <section className="flex-1 flex flex-col bg-[#0b0f1a] relative">
-        {/* Top Navigation Bar */}
         <header className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0b0f1a]/80 backdrop-blur-md z-10">
           <div className="flex items-center gap-4">
             <span className="text-sm font-semibold text-slate-200">New Thread</span>
@@ -475,7 +511,6 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Chat / Content Scroll Area */}
         <div className="flex-1 overflow-y-auto px-10 py-8 space-y-10 custom-scrollbar relative">
           {messages.length <= 1 && (
             <div className="flex flex-col items-center justify-center py-20 text-center animate-in fade-in slide-in-from-bottom-4 duration-1000">
@@ -492,7 +527,6 @@ export default function Home() {
           <div className="max-w-3xl mx-auto space-y-12">
             {messages.map((msg, idx) => (
               <div key={idx} className={`flex gap-6 group ${msg.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in duration-500`}>
-                {/* Avatar / Icon */}
                 <div className="flex-shrink-0 mt-1">
                   {msg.role === 'assistant' ? (
                     <div className="w-10 h-10 bg-blue-600 text-white rounded-xl flex items-center justify-center premium-shadow-blue shadow-blue-900/40">
@@ -507,7 +541,6 @@ export default function Home() {
                   )}
                 </div>
 
-                {/* Message Content */}
                 <div className={`flex-1 space-y-4 ${msg.role === 'user' ? 'text-right' : ''}`}>
                   <div className={`inline-block p-6 rounded-3xl text-sm leading-relaxed font-medium ${msg.role === 'assistant'
                     ? 'glass-card border-white/5'
@@ -541,7 +574,7 @@ export default function Home() {
                       </div>
                       <div className="grid grid-cols-1 gap-2">
                         {msg.sources.map((source, i) => (
-                          <div key={i} className="flex items-center gap-3 p-3 rounded-xl bg-white/2 border border-white/5 hover:bg-white/5 transition-colors cursor-pointer group">
+                          <div key={i} className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.05] transition-colors cursor-pointer group">
                             <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
                               <Paperclip className="w-4 h-4 text-orange-500/70" />
                             </div>
@@ -585,15 +618,24 @@ export default function Home() {
             <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-[2rem] blur opacity-10 group-focus-within:opacity-20 transition duration-500"></div>
 
             <form onSubmit={handleSend} className="relative glass-card-hover glass-card rounded-[2rem] p-2 flex items-center gap-3 border-white/10 group-focus-within:border-blue-500/50 group-focus-within:bg-white/5 transition-all duration-300">
-              <button type="button" className="p-3 text-slate-500 hover:text-slate-300 transition-colors">
-                <Paperclip className="w-5 h-5" />
-              </button>
+              {/* --- NEW: Dynamic Filter Indicator --- */}
+              <div
+                className="p-3 text-slate-500 flex items-center gap-2 group/tooltip relative cursor-help"
+                title={`${activeQueryDocIds.size} of ${managedDocs.length} documents selected for context`}
+              >
+                <Filter className={`w-5 h-5 transition-colors ${activeQueryDocIds.size < managedDocs.length ? 'text-blue-400' : ''}`} />
+                {managedDocs.length > 0 && (
+                  <span className="absolute -top-2 -right-2 bg-blue-600 text-white text-[9px] font-bold w-4 h-4 flex items-center justify-center rounded-full">
+                    {activeQueryDocIds.size}
+                  </span>
+                )}
+              </div>
 
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Type your query here..."
+                placeholder={activeQueryDocIds.size === 0 ? "Querying external knowledge (No docs selected)..." : "Type your query here..."}
                 className="flex-1 bg-transparent border-none focus:ring-0 text-slate-200 placeholder-slate-500 text-sm py-4 outline-none"
               />
 
