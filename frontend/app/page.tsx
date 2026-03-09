@@ -11,7 +11,6 @@ import {
   Plus,
   ChevronRight,
   Search,
-  Mic,
   Paperclip,
   Send,
   Share2,
@@ -22,7 +21,8 @@ import {
   Filter,
   MessageSquare,
   PlusCircle,
-  AlertTriangle // --- NEW: Icon for our warning modal ---
+  AlertTriangle,
+  ChevronDown
 } from 'lucide-react';
 
 type Message = {
@@ -51,12 +51,19 @@ type ChatSession = {
   created_at: string;
 };
 
-// --- NEW: Type for our unified deletion target ---
 type DeleteTarget = {
   type: 'document' | 'chat';
   id: string;
   name: string;
 };
+
+const MODEL_OPTIONS = [
+  { id: 'openai/gpt-oss-120b:free', name: 'GPT OSS (120B Free)' },
+  { id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Free)' },
+  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 (70B Free)' },
+  { id: 'google/gemma-3-27b-it:free', name: 'Gemma 3 (27B Free)' },
+  { id: 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free', name: 'Dolphin Mistral (24B)' }
+];
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -77,9 +84,9 @@ export default function Home() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isSessionsLoading, setIsSessionsLoading] = useState(false);
-
-  // --- NEW: State to control the confirmation modal ---
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+
+  const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0].id);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -156,7 +163,6 @@ export default function Home() {
     }
   };
 
-  // --- UPGRADED: Deletion Logic now routes through the modal ---
   const confirmDeleteSession = (id: string, name: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setDeleteTarget({ type: 'chat', id, name });
@@ -190,7 +196,6 @@ export default function Home() {
     } catch (error) {
       console.error(`Failed to delete ${deleteTarget.type}`, error);
     } finally {
-      // Always close the modal after attempting deletion
       setDeleteTarget(null);
     }
   };
@@ -246,7 +251,8 @@ export default function Home() {
         body: JSON.stringify({
           query: userQuery,
           session_id: activeSessionId,
-          selected_doc_ids: Array.from(activeQueryDocIds)
+          selected_doc_ids: Array.from(activeQueryDocIds),
+          model: selectedModel
         }),
       });
 
@@ -451,7 +457,6 @@ export default function Home() {
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
                             <p className="text-[9px] text-slate-500">{formatBytes(doc.file_size)}</p>
                           </div>
-                          {/* UPGRADED: Delete Document triggered through Modal */}
                           <button onClick={() => confirmDeleteDocument(doc.id, doc.document_name)} className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all" title="Delete Document"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ))}
@@ -467,7 +472,6 @@ export default function Home() {
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
                             <p className="text-[9px] text-blue-500/70">{formatBytes(doc.file_size)}</p>
                           </div>
-                          {/* UPGRADED: Delete Document triggered through Modal */}
                           <button onClick={() => confirmDeleteDocument(doc.id, doc.document_name)} className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all" title="Delete Document"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ))}
@@ -493,12 +497,11 @@ export default function Home() {
 
       {/* --- MAIN CONTENT AREA --- */}
       <section className="flex-1 flex flex-col bg-[#0b0f1a] relative">
+
+        {/* --- HEADER: Model selector removed from here --- */}
         <header className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0b0f1a]/80 backdrop-blur-md z-10">
           <div className="flex items-center gap-4">
             <span className="text-sm font-semibold text-slate-200 max-w-[200px] truncate">{activeSessionTitle}</span>
-            <span className="bg-blue-600/10 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-widest border border-blue-600/20">
-              Rag Engine V2.4
-            </span>
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/5">
@@ -609,11 +612,12 @@ export default function Home() {
           </div>
         </div>
 
+        {/* --- INPUT BAR AREA --- */}
         <div className="p-8 bg-[#0b0f1a] relative z-20">
           <div className="max-w-3xl mx-auto relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-[2rem] blur opacity-10 group-focus-within:opacity-20 transition duration-500"></div>
 
-            <form onSubmit={handleSend} className="relative glass-card-hover glass-card rounded-[2rem] p-2 flex items-center gap-3 border-white/10 group-focus-within:border-blue-500/50 group-focus-within:bg-white/5 transition-all duration-300">
+            <form onSubmit={handleSend} className="relative glass-card-hover glass-card rounded-[2rem] p-2 flex items-center gap-2 border-white/10 group-focus-within:border-blue-500/50 group-focus-within:bg-white/5 transition-all duration-300">
               <div className="p-3 text-slate-500 flex items-center gap-2 group/tooltip relative cursor-help" title={`${activeQueryDocIds.size} of ${managedDocs.length} documents selected for context`}>
                 <Filter className={`w-5 h-5 transition-colors ${activeQueryDocIds.size < managedDocs.length ? 'text-blue-400' : ''}`} />
                 {managedDocs.length > 0 && (
@@ -631,12 +635,28 @@ export default function Home() {
                 className="flex-1 bg-transparent border-none focus:ring-0 text-slate-200 placeholder-slate-500 text-sm py-4 outline-none"
               />
 
-              <div className="flex items-center gap-1 pr-2">
-                <button type="button" className="p-3 text-slate-500 hover:text-slate-300 transition-colors"><Mic className="w-5 h-5" /></button>
+              {/* --- UPGRADED: Model Selector moved to input bar, Mic icon removed --- */}
+              <div className="flex items-center gap-2 pr-2">
+                <div className="relative group/model flex items-center">
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="appearance-none bg-transparent hover:bg-white/5 text-slate-400 hover:text-slate-300 text-[10px] font-bold px-3 py-2 rounded-lg uppercase tracking-wider cursor-pointer outline-none pr-7 transition-colors"
+                    title="Select AI Model"
+                  >
+                    {MODEL_OPTIONS.map(model => (
+                      <option key={model.id} value={model.id} className="bg-[#0b0f1a] text-slate-200 uppercase">
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3 h-3 text-slate-500 absolute right-2 pointer-events-none group-hover/model:text-slate-300 transition-colors" />
+                </div>
+
                 <button
                   type="submit"
                   disabled={!input.trim() || isLoading || !activeSessionId}
-                  className="w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-blue-900/40 transition-all disabled:opacity-50 disabled:grayscale disabled:scale-95 active:scale-90"
+                  className="w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-blue-900/40 transition-all disabled:opacity-50 disabled:grayscale disabled:scale-95 active:scale-90 shrink-0"
                 >
                   <Send className="w-5 h-5" />
                 </button>
@@ -690,7 +710,6 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* UPGRADED: Delete Session triggered through Modal */}
                   <button
                     onClick={(e) => confirmDeleteSession(session.id, session.title, e)}
                     className="text-slate-500 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all shrink-0"
@@ -705,7 +724,7 @@ export default function Home() {
         </div>
       </aside>
 
-      {/* --- NEW: CUSTOM CONFIRMATION MODAL --- */}
+      {/* --- CUSTOM CONFIRMATION MODAL --- */}
       {deleteTarget && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-[#0b0f1a] border border-white/10 p-6 rounded-2xl shadow-2xl max-w-sm w-full mx-4 animate-in zoom-in-95 duration-200">

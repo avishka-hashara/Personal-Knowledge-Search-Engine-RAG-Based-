@@ -16,7 +16,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import TextLoader
-from langchain_experimental.text_splitter import SemanticChunker # --- UPGRADED ---
+from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
@@ -82,6 +82,7 @@ class QueryRequest(BaseModel):
     query: str
     session_id: str
     selected_doc_ids: Optional[List[str]] = None
+    model: Optional[str] = "openai/gpt-oss-120b:free" # --- UPGRADED DEFAULT ---
 
 class DriveImportRequest(BaseModel):
     file_ids: List[str]
@@ -272,7 +273,6 @@ async def process_documents(db: Session):
                     d.metadata["source_type"] = doc.source_type
                 all_documents.extend(loaded_docs)
         
-        # --- UPGRADED: Semantic Chunking ---
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         text_splitter = SemanticChunker(
             embeddings, 
@@ -361,7 +361,11 @@ async def query_knowledge(request: QueryRequest, db: Session = Depends(get_db)):
             Answer:
             """
         
-        llm = ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"), model="openai/gpt-oss-120b")
+        llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1", 
+            api_key=os.getenv("OPENROUTER_API_KEY"), 
+            model=request.model
+        )
         response = llm.invoke(prompt)
         
         sources_list = [doc.page_content for doc in relevant_docs] if relevant_docs else []
