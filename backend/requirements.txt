@@ -12,3 +12,5 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.0
 sqlalchemy==2.0.29
 pypdf==5.3.0
+langchain-experimental==0.0.55
+rank-bm25==0.2.2

@@ -19,7 +19,10 @@ import {
   FolderOpen,
   Trash2,
   RefreshCw,
-  Filter // NEW ICON
+  Filter,
+  MessageSquare,
+  PlusCircle,
+  AlertTriangle // --- NEW: Icon for our warning modal ---
 } from 'lucide-react';
 
 type Message = {
@@ -42,10 +45,21 @@ type DocumentDB = {
   file_size: number;
 };
 
+type ChatSession = {
+  id: string;
+  title: string;
+  created_at: string;
+};
+
+// --- NEW: Type for our unified deletion target ---
+type DeleteTarget = {
+  type: 'document' | 'chat';
+  id: string;
+  name: string;
+};
+
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?' }
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -58,9 +72,14 @@ export default function Home() {
 
   const [managedDocs, setManagedDocs] = useState<DocumentDB[]>([]);
   const [isDocsLoading, setIsDocsLoading] = useState(false);
-
-  // --- NEW: State for querying specific documents ---
   const [activeQueryDocIds, setActiveQueryDocIds] = useState<Set<string>>(new Set());
+
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isSessionsLoading, setIsSessionsLoading] = useState(false);
+
+  // --- NEW: State to control the confirmation modal ---
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -74,7 +93,111 @@ export default function Home() {
 
   useEffect(() => {
     fetchDocuments();
+    initializeChatSystem();
   }, []);
+
+  const initializeChatSystem = async () => {
+    setIsSessionsLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/chats');
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions);
+
+        if (data.sessions.length > 0) {
+          loadSession(data.sessions[0].id);
+        } else {
+          createNewSession();
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load chat sessions", error);
+    } finally {
+      setIsSessionsLoading(false);
+    }
+  };
+
+  const createNewSession = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/chats', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveSessionId(data.session_id);
+        setMessages([{ role: 'assistant', content: 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?' }]);
+
+        const fetchRes = await fetch('http://localhost:8000/chats');
+        const fetchData = await fetchRes.json();
+        setSessions(fetchData.sessions);
+      }
+    } catch (error) {
+      console.error("Failed to create new session", error);
+    }
+  };
+
+  const loadSession = async (id: string) => {
+    setActiveSessionId(id);
+    try {
+      const res = await fetch(`http://localhost:8000/chats/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.messages.length === 0) {
+          setMessages([{ role: 'assistant', content: 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?' }]);
+        } else {
+          const mappedMessages = data.messages.map((m: any) => ({
+            role: m.role,
+            content: m.content,
+            sources: m.sources ? JSON.parse(m.sources) : []
+          }));
+          setMessages(mappedMessages);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load session messages", error);
+    }
+  };
+
+  // --- UPGRADED: Deletion Logic now routes through the modal ---
+  const confirmDeleteSession = (id: string, name: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleteTarget({ type: 'chat', id, name });
+  };
+
+  const confirmDeleteDocument = (id: string, name: string) => {
+    setDeleteTarget({ type: 'document', id, name });
+  };
+
+  const executeDelete = async () => {
+    if (!deleteTarget) return;
+
+    try {
+      if (deleteTarget.type === 'chat') {
+        const res = await fetch(`http://localhost:8000/chats/${deleteTarget.id}`, { method: 'DELETE' });
+        if (res.ok) {
+          if (activeSessionId === deleteTarget.id) {
+            initializeChatSystem();
+          } else {
+            const fetchRes = await fetch('http://localhost:8000/chats');
+            const fetchData = await fetchRes.json();
+            setSessions(fetchData.sessions);
+          }
+        }
+      } else if (deleteTarget.type === 'document') {
+        const res = await fetch(`http://localhost:8000/documents/${deleteTarget.id}`, { method: 'DELETE' });
+        if (res.ok) {
+          fetchDocuments();
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to delete ${deleteTarget.type}`, error);
+    } finally {
+      // Always close the modal after attempting deletion
+      setDeleteTarget(null);
+    }
+  };
+
+  const cancelDelete = () => {
+    setDeleteTarget(null);
+  };
 
   const fetchDocuments = async () => {
     setIsDocsLoading(true);
@@ -83,8 +206,6 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setManagedDocs(data.documents);
-
-        // --- NEW: Default all fetched documents to "Active" for querying ---
         setActiveQueryDocIds(new Set(data.documents.map((d: DocumentDB) => d.id)));
       }
     } catch (error) {
@@ -94,20 +215,6 @@ export default function Home() {
     }
   };
 
-  const handleDeleteDocument = async (id: string) => {
-    try {
-      const res = await fetch(`http://localhost:8000/documents/${id}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        fetchDocuments();
-      }
-    } catch (error) {
-      console.error("Error deleting document", error);
-    }
-  };
-
-  // --- NEW: Quick Selection Handlers ---
   const localDocs = managedDocs.filter(d => d.source_type === 'local');
   const driveDocs = managedDocs.filter(d => d.source_type === 'drive');
 
@@ -125,35 +232,25 @@ export default function Home() {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || !activeSessionId) return;
 
     const userQuery = input;
     setInput('');
-
     setMessages((prev) => [...prev, { role: 'user', content: userQuery }]);
     setIsLoading(true);
 
     try {
-      const historyForBackend = messages
-        .filter(m => m.content !== 'Hello! I am your Personal Knowledge Engine. What would you like to know about your notes?')
-        .map((m) => ({
-          role: m.role,
-          content: m.content
-        }));
-
       const res = await fetch('http://localhost:8000/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: userQuery,
-          history: historyForBackend,
-          selected_doc_ids: Array.from(activeQueryDocIds) // --- NEW: Pass selected IDs to backend ---
+          session_id: activeSessionId,
+          selected_doc_ids: Array.from(activeQueryDocIds)
         }),
       });
 
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
 
       const data = await res.json();
 
@@ -162,6 +259,10 @@ export default function Home() {
         content: data.answer,
         sources: data.sources
       }]);
+
+      const fetchRes = await fetch('http://localhost:8000/chats');
+      const fetchData = await fetchRes.json();
+      setSessions(fetchData.sessions);
 
     } catch (error) {
       console.error("Error fetching data:", error);
@@ -183,19 +284,11 @@ export default function Home() {
     formData.append('file', file);
 
     try {
-      const uploadRes = await fetch('http://localhost:8000/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
+      const uploadRes = await fetch('http://localhost:8000/upload', { method: 'POST', body: formData });
       if (!uploadRes.ok) throw new Error('Upload Error');
 
       setUploadStatus('Processing into vector database...');
-
-      const processRes = await fetch('http://localhost:8000/process', {
-        method: 'POST',
-      });
-
+      const processRes = await fetch('http://localhost:8000/process', { method: 'POST' });
       if (!processRes.ok) throw new Error('Backend Error');
 
       setUploadStatus('Success! File is now searchable.');
@@ -210,12 +303,7 @@ export default function Home() {
     setDriveStatus('Fetching files from Drive...');
     try {
       const res = await fetch('http://localhost:8000/drive/list');
-
-      if (!res.ok) {
-        if (res.status === 401) throw new Error('Please click "Authenticate" first!');
-        throw new Error('Failed to fetch files.');
-      }
-
+      if (!res.ok) throw new Error(res.status === 401 ? 'Please click "Authenticate" first!' : 'Failed to fetch files.');
       const data = await res.json();
       setAvailableDriveFiles(data.files);
       setDriveStatus('');
@@ -226,17 +314,13 @@ export default function Home() {
 
   const toggleFileSelection = (id: string) => {
     const newSelection = new Set(selectedFileIds);
-    if (newSelection.has(id)) {
-      newSelection.delete(id);
-    } else {
-      newSelection.add(id);
-    }
+    if (newSelection.has(id)) newSelection.delete(id);
+    else newSelection.add(id);
     setSelectedFileIds(newSelection);
   };
 
   const handleImportSelected = async () => {
     if (selectedFileIds.size === 0) return;
-
     setDriveStatus(`Importing and processing ${selectedFileIds.size} files...`);
     try {
       const res = await fetch('http://localhost:8000/drive/import', {
@@ -244,9 +328,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file_ids: Array.from(selectedFileIds) }),
       });
-
       if (!res.ok) throw new Error('Import failed.');
-
       const data = await res.json();
       setDriveStatus(`Success! Added ${data.files.length} files to your knowledge base.`);
       setAvailableDriveFiles([]);
@@ -265,12 +347,14 @@ export default function Home() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  return (
-    <main className="flex h-screen bg-[#0b0f1a] text-slate-200 overflow-hidden font-sans">
-      {/* --- SIDEBAR --- */}
-      <aside className="w-80 sidebar-gradient border-r border-white/5 flex flex-col premium-shadow z-20">
+  const activeSessionTitle = sessions.find(s => s.id === activeSessionId)?.title || "New Thread";
 
-        {/* Logo & Header */}
+  return (
+    <main className="flex h-screen bg-[#0b0f1a] text-slate-200 overflow-hidden font-sans relative">
+
+      {/* --- LEFT SIDEBAR --- */}
+      <aside className="w-80 sidebar-gradient border-r border-white/5 flex flex-col premium-shadow z-20 shrink-0">
+
         <div className="p-6 flex items-center gap-3 flex-shrink-0">
           <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center premium-shadow">
             <Search className="w-6 h-6 text-white" />
@@ -281,22 +365,14 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Navigation */}
         <nav className="px-4 space-y-2 mb-4 flex-shrink-0">
           <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-blue-600/10 text-blue-400 font-medium transition-all hover:bg-blue-600/20 group">
             <LayoutDashboard className="w-5 h-5" />
             <span>Dashboard</span>
           </button>
-          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-slate-400 font-medium transition-all hover:bg-white/5 hover:text-slate-200 group">
-            <History className="w-5 h-5 text-slate-500 group-hover:text-slate-300 transition-colors" />
-            <span>Recent Threads</span>
-          </button>
         </nav>
 
-        {/* Scrollable Middle Section (Uploads & Documents) */}
         <div className="flex-1 overflow-y-auto px-4 space-y-4 custom-scrollbar pb-6">
-
-          {/* Local Upload */}
           <div className="glass-card rounded-2xl p-5 border border-white/5">
             <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Local Upload</h2>
             <div
@@ -306,102 +382,52 @@ export default function Home() {
               <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center group-hover:bg-blue-600/20 group-hover:text-blue-400 transition-all">
                 <Upload className="w-5 h-5 text-slate-400 group-hover:text-blue-400" />
               </div>
-              <p className="text-[11px] text-slate-400 text-center leading-relaxed">
-                Drop PDF, TXT, or DOCX files here
-              </p>
-              <input
-                id="fileInput"
-                type="file"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-                accept=".txt,.md,.pdf"
-              />
+              <p className="text-[11px] text-slate-400 text-center leading-relaxed">Drop PDF, TXT, or DOCX files here</p>
+              <input id="fileInput" type="file" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} accept=".txt,.md,.pdf" />
             </div>
-
             {file && (
               <div className="mt-3 p-2 bg-blue-600/10 rounded-lg flex items-center justify-between">
                 <span className="text-xs text-blue-300 truncate max-w-[150px]">{file.name}</span>
-                <button onClick={() => setFile(null)} className="text-blue-400 hover:text-blue-300">
-                  <Plus className="w-4 h-4 rotate-45" />
-                </button>
+                <button onClick={() => setFile(null)} className="text-blue-400 hover:text-blue-300"><Plus className="w-4 h-4 rotate-45" /></button>
               </div>
             )}
-
-            <button
-              onClick={handleFileUpload}
-              disabled={!file || uploadStatus.includes('ing')}
-              className="w-full mt-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-3 rounded-xl transition-all shadow-lg shadow-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
+            <button onClick={handleFileUpload} disabled={!file || uploadStatus.includes('ing')} className="w-full mt-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-3 rounded-xl transition-all shadow-lg shadow-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed">
               {uploadStatus.includes('ing') ? 'Processing...' : 'Upload & Process'}
             </button>
-            {uploadStatus && !uploadStatus.includes('ing') && (
-              <p className="mt-2 text-[10px] text-center text-blue-400 font-medium">{uploadStatus}</p>
-            )}
+            {uploadStatus && !uploadStatus.includes('ing') && <p className="mt-2 text-[10px] text-center text-blue-400 font-medium">{uploadStatus}</p>}
           </div>
 
-          {/* Google Drive Import */}
           <div className="glass-card rounded-2xl p-5 border border-white/5">
             <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Google Drive Import</h2>
             <div className="space-y-2">
-              <button
-                onClick={() => window.open('http://localhost:8000/auth/google/login', '_blank')}
-                className="w-full bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold py-2.5 rounded-lg border border-white/5 transition-all flex items-center justify-center gap-2"
-              >
-                <Plus className="w-4 h-4 text-slate-400" />
-                Authenticate Account
+              <button onClick={() => window.open('http://localhost:8000/auth/google/login', '_blank')} className="w-full bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold py-2.5 rounded-lg border border-white/5 transition-all flex items-center justify-center gap-2">
+                <Plus className="w-4 h-4 text-slate-400" /> Authenticate Account
               </button>
-              <button
-                onClick={handleFetchDriveFiles}
-                className="w-full bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold py-2.5 rounded-lg border border-white/5 transition-all flex items-center justify-center gap-2"
-              >
-                <History className="w-4 h-4 text-slate-400" />
-                Fetch My Files
+              <button onClick={handleFetchDriveFiles} className="w-full bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold py-2.5 rounded-lg border border-white/5 transition-all flex items-center justify-center gap-2">
+                <History className="w-4 h-4 text-slate-400" /> Fetch My Files
               </button>
             </div>
-
-            {driveStatus && (
-              <p className="mt-2 text-[10px] text-center text-blue-400 font-medium">{driveStatus}</p>
-            )}
-
+            {driveStatus && <p className="mt-2 text-[10px] text-center text-blue-400 font-medium">{driveStatus}</p>}
             {availableDriveFiles.length > 0 && (
               <div className="mt-4 space-y-2 max-h-32 overflow-y-auto pr-1 custom-scrollbar">
                 {availableDriveFiles.map(f => (
                   <div key={f.id} className="flex items-center gap-2 p-1.5 hover:bg-white/5 rounded transition-colors group">
-                    <input
-                      type="checkbox"
-                      className="w-3.5 h-3.5 rounded border-white/20 bg-transparent text-blue-600 focus:ring-blue-600"
-                      checked={selectedFileIds.has(f.id)}
-                      onChange={() => toggleFileSelection(f.id)}
-                    />
+                    <input type="checkbox" className="w-3.5 h-3.5 rounded border-white/20 bg-transparent text-blue-600 focus:ring-blue-600" checked={selectedFileIds.has(f.id)} onChange={() => toggleFileSelection(f.id)} />
                     <span className="text-[11px] text-slate-300 truncate">{f.name}</span>
                   </div>
                 ))}
               </div>
             )}
-
             {selectedFileIds.size > 0 && (
-              <button
-                onClick={handleImportSelected}
-                className="w-full mt-3 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-[11px] font-bold py-2 rounded-lg transition-all"
-              >
-                Import {selectedFileIds.size} Files
-              </button>
+              <button onClick={handleImportSelected} className="w-full mt-3 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-[11px] font-bold py-2 rounded-lg transition-all">Import {selectedFileIds.size} Files</button>
             )}
           </div>
 
-          {/* --- UPGRADED: Managed Documents Section --- */}
           <div className="glass-card rounded-2xl p-5 border border-white/5">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Active Documents</h2>
-              <button
-                onClick={fetchDocuments}
-                className="text-slate-500 hover:text-blue-400 transition-colors p-1"
-                title="Refresh Documents"
-              >
-                <RefreshCw className={`w-3 h-3 ${isDocsLoading ? 'animate-spin' : ''}`} />
-              </button>
+              <button onClick={fetchDocuments} className="text-slate-500 hover:text-blue-400 transition-colors p-1" title="Refresh Documents"><RefreshCw className={`w-3 h-3 ${isDocsLoading ? 'animate-spin' : ''}`} /></button>
             </div>
-
             {managedDocs.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-4 border-b border-white/5 pb-3">
                 <button onClick={selectAllDocs} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">All</button>
@@ -410,7 +436,6 @@ export default function Home() {
                 <button onClick={clearSelection} className="text-[9px] font-bold uppercase tracking-wider px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-slate-400 hover:text-white transition-colors">None</button>
               </div>
             )}
-
             <div className="space-y-4">
               {managedDocs.length === 0 && !isDocsLoading ? (
                 <p className="text-[11px] text-slate-500 italic text-center py-2">No documents uploaded.</p>
@@ -421,50 +446,29 @@ export default function Home() {
                       <h3 className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">From Local</h3>
                       {localDocs.map(doc => (
                         <div key={doc.id} className={`flex items-center gap-2 p-2 rounded-lg border transition-colors group ${activeQueryDocIds.has(doc.id) ? 'bg-white/[0.04] border-white/10' : 'bg-transparent border-transparent opacity-50'}`}>
-                          <input
-                            type="checkbox"
-                            checked={activeQueryDocIds.has(doc.id)}
-                            onChange={() => toggleQueryDoc(doc.id)}
-                            className="w-3.5 h-3.5 rounded border-white/20 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer"
-                          />
+                          <input type="checkbox" checked={activeQueryDocIds.has(doc.id)} onChange={() => toggleQueryDoc(doc.id)} className="w-3.5 h-3.5 rounded border-white/20 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer" />
                           <div className="overflow-hidden pr-2 flex-1">
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
                             <p className="text-[9px] text-slate-500">{formatBytes(doc.file_size)}</p>
                           </div>
-                          <button
-                            onClick={() => handleDeleteDocument(doc.id)}
-                            className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all"
-                            title="Delete Document"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {/* UPGRADED: Delete Document triggered through Modal */}
+                          <button onClick={() => confirmDeleteDocument(doc.id, doc.document_name)} className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all" title="Delete Document"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ))}
                     </div>
                   )}
-
                   {driveDocs.length > 0 && (
                     <div className="space-y-2">
                       <h3 className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">From Drive</h3>
                       {driveDocs.map(doc => (
                         <div key={doc.id} className={`flex items-center gap-2 p-2 rounded-lg border transition-colors group ${activeQueryDocIds.has(doc.id) ? 'bg-blue-900/10 border-blue-500/20' : 'bg-transparent border-transparent opacity-50'}`}>
-                          <input
-                            type="checkbox"
-                            checked={activeQueryDocIds.has(doc.id)}
-                            onChange={() => toggleQueryDoc(doc.id)}
-                            className="w-3.5 h-3.5 rounded border-blue-500/30 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer"
-                          />
+                          <input type="checkbox" checked={activeQueryDocIds.has(doc.id)} onChange={() => toggleQueryDoc(doc.id)} className="w-3.5 h-3.5 rounded border-blue-500/30 bg-transparent text-blue-600 focus:ring-blue-600 cursor-pointer" />
                           <div className="overflow-hidden pr-2 flex-1">
                             <p className="text-[11px] font-medium text-slate-300 truncate" title={doc.document_name}>{doc.document_name}</p>
                             <p className="text-[9px] text-blue-500/70">{formatBytes(doc.file_size)}</p>
                           </div>
-                          <button
-                            onClick={() => handleDeleteDocument(doc.id)}
-                            className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all"
-                            title="Delete Document"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {/* UPGRADED: Delete Document triggered through Modal */}
+                          <button onClick={() => confirmDeleteDocument(doc.id, doc.document_name)} className="text-red-500/50 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all" title="Delete Document"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ))}
                     </div>
@@ -475,18 +479,15 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Library Footer (Fixed) */}
         <div className="mt-auto p-6 border-t border-white/5 flex items-center gap-3 bg-black/20 flex-shrink-0">
           <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-orange-200 to-orange-400 border-2 border-white/10 overflow-hidden premium-shadow">
             <div className="w-full h-full flex items-center justify-center text-orange-900 font-bold text-xs">AJ</div>
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-bold text-white truncate">Alex Johnson</h3>
+            <h3 className="text-sm font-bold text-white truncate">Avishka</h3>
             <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Pro Member</p>
           </div>
-          <button className="text-slate-500 hover:text-slate-200 transition-colors p-1">
-            <Settings className="w-5 h-5" />
-          </button>
+          <button className="text-slate-500 hover:text-slate-200 transition-colors p-1"><Settings className="w-5 h-5" /></button>
         </div>
       </aside>
 
@@ -494,7 +495,7 @@ export default function Home() {
       <section className="flex-1 flex flex-col bg-[#0b0f1a] relative">
         <header className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0b0f1a]/80 backdrop-blur-md z-10">
           <div className="flex items-center gap-4">
-            <span className="text-sm font-semibold text-slate-200">New Thread</span>
+            <span className="text-sm font-semibold text-slate-200 max-w-[200px] truncate">{activeSessionTitle}</span>
             <span className="bg-blue-600/10 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-widest border border-blue-600/20">
               Rag Engine V2.4
             </span>
@@ -504,10 +505,6 @@ export default function Home() {
               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
               <span className="text-[11px] font-semibold text-slate-300">System Ready</span>
             </div>
-            <button className="flex items-center gap-2 text-slate-400 hover:text-slate-200 transition-all group">
-              <Share2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
-              <span className="text-xs font-medium">Share</span>
-            </button>
           </div>
         </header>
 
@@ -612,17 +609,12 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Input Bar Area */}
         <div className="p-8 bg-[#0b0f1a] relative z-20">
           <div className="max-w-3xl mx-auto relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-[2rem] blur opacity-10 group-focus-within:opacity-20 transition duration-500"></div>
 
             <form onSubmit={handleSend} className="relative glass-card-hover glass-card rounded-[2rem] p-2 flex items-center gap-3 border-white/10 group-focus-within:border-blue-500/50 group-focus-within:bg-white/5 transition-all duration-300">
-              {/* --- NEW: Dynamic Filter Indicator --- */}
-              <div
-                className="p-3 text-slate-500 flex items-center gap-2 group/tooltip relative cursor-help"
-                title={`${activeQueryDocIds.size} of ${managedDocs.length} documents selected for context`}
-              >
+              <div className="p-3 text-slate-500 flex items-center gap-2 group/tooltip relative cursor-help" title={`${activeQueryDocIds.size} of ${managedDocs.length} documents selected for context`}>
                 <Filter className={`w-5 h-5 transition-colors ${activeQueryDocIds.size < managedDocs.length ? 'text-blue-400' : ''}`} />
                 {managedDocs.length > 0 && (
                   <span className="absolute -top-2 -right-2 bg-blue-600 text-white text-[9px] font-bold w-4 h-4 flex items-center justify-center rounded-full">
@@ -640,42 +632,116 @@ export default function Home() {
               />
 
               <div className="flex items-center gap-1 pr-2">
-                <button type="button" className="p-3 text-slate-500 hover:text-slate-300 transition-colors">
-                  <Mic className="w-5 h-5" />
-                </button>
+                <button type="button" className="p-3 text-slate-500 hover:text-slate-300 transition-colors"><Mic className="w-5 h-5" /></button>
                 <button
                   type="submit"
-                  disabled={!input.trim() || isLoading}
+                  disabled={!input.trim() || isLoading || !activeSessionId}
                   className="w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-blue-900/40 transition-all disabled:opacity-50 disabled:grayscale disabled:scale-95 active:scale-90"
                 >
                   <Send className="w-5 h-5" />
                 </button>
               </div>
             </form>
-            <p className="mt-3 text-center text-[10px] font-bold text-slate-600 uppercase tracking-[0.2em]">
-              Knowledge Engine Powered by RAG Technology • Privacy Protected
-            </p>
           </div>
         </div>
       </section>
 
+      {/* --- RIGHT SIDEBAR (Chat History) --- */}
+      <aside className="w-72 bg-[#06080e] border-l border-white/5 flex flex-col z-20 shrink-0">
+        <div className="p-6 pb-4">
+          <button
+            onClick={createNewSession}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-3 rounded-xl transition-all shadow-lg shadow-blue-900/20"
+          >
+            <PlusCircle className="w-4 h-4" />
+            New Chat
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 pb-6 custom-scrollbar">
+          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3 px-2">History</h3>
+
+          {isSessionsLoading ? (
+            <div className="flex items-center justify-center py-10">
+              <RefreshCw className="w-5 h-5 text-slate-500 animate-spin" />
+            </div>
+          ) : sessions.length === 0 ? (
+            <p className="text-[11px] text-slate-500 italic text-center py-4">No history yet.</p>
+          ) : (
+            <div className="space-y-1">
+              {sessions.map(session => (
+                <div
+                  key={session.id}
+                  onClick={() => loadSession(session.id)}
+                  className={`flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all group ${activeSessionId === session.id
+                      ? 'bg-blue-600/10 border border-blue-500/20'
+                      : 'hover:bg-white/5 border border-transparent'
+                    }`}
+                >
+                  <div className="flex items-center gap-3 overflow-hidden flex-1 pr-2">
+                    <MessageSquare className={`w-4 h-4 shrink-0 ${activeSessionId === session.id ? 'text-blue-400' : 'text-slate-500'}`} />
+                    <div className="flex flex-col overflow-hidden">
+                      <span className={`text-xs font-medium truncate ${activeSessionId === session.id ? 'text-blue-100' : 'text-slate-300'}`}>
+                        {session.title}
+                      </span>
+                      <span className="text-[9px] text-slate-500">
+                        {new Date(session.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* UPGRADED: Delete Session triggered through Modal */}
+                  <button
+                    onClick={(e) => confirmDeleteSession(session.id, session.title, e)}
+                    className="text-slate-500 hover:text-red-400 p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                    title="Delete Chat"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* --- NEW: CUSTOM CONFIRMATION MODAL --- */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#0b0f1a] border border-white/10 p-6 rounded-2xl shadow-2xl max-w-sm w-full mx-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-500" />
+              </div>
+              <h3 className="text-lg font-bold text-white">Confirm Deletion</h3>
+            </div>
+            <p className="text-sm text-slate-400 mb-6 leading-relaxed">
+              Are you sure you want to delete <span className="font-bold text-slate-200">"{deleteTarget.name}"</span>? This action cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={cancelDelete}
+                className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-300 hover:bg-white/5 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeDelete}
+                className="px-4 py-2 rounded-xl text-sm font-semibold bg-red-600 hover:bg-red-500 text-white transition-colors shadow-lg shadow-red-900/20"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style jsx global>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 5px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.05);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.1);
-        }
-        .premium-shadow-blue {
-          box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.39);
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.05); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.1); }
+        .premium-shadow-blue { box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.39); }
       `}</style>
     </main>
   );

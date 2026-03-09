@@ -3,6 +3,7 @@ import shutil
 import io
 import uuid
 import datetime
+import json
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,13 +11,12 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional
 
-# --- NEW: SQLAlchemy Database Imports ---
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from langchain_openai import ChatOpenAI
-from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredMarkdownLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
+from langchain_experimental.text_splitter import SemanticChunker # --- UPGRADED ---
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
@@ -27,7 +27,7 @@ from googleapiclient.http import MediaIoBaseDownload
 load_dotenv()
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
-# --- NEW: SQLite Database Setup ---
+# --- SQLite Database Setup ---
 os.makedirs("data", exist_ok=True)
 SQLALCHEMY_DATABASE_URL = "sqlite:///./data/knowledge.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -38,10 +38,25 @@ class DocumentDB(Base):
     __tablename__ = "documents"
     id = Column(String, primary_key=True, index=True)
     document_name = Column(String)
-    source_type = Column(String) # "local" or "drive"
+    source_type = Column(String) 
     upload_date = Column(DateTime, default=datetime.datetime.utcnow)
     file_size = Column(Integer)
     file_path = Column(String)
+
+class ChatSessionDB(Base):
+    __tablename__ = "chat_sessions"
+    id = Column(String, primary_key=True, index=True)
+    title = Column(String, default="New Conversation")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class ChatMessageDB(Base):
+    __tablename__ = "chat_messages"
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, index=True)
+    role = Column(String)
+    content = Column(String)
+    sources = Column(String, nullable=True)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
@@ -63,13 +78,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Message(BaseModel):
-    role: str
-    content: str
-
 class QueryRequest(BaseModel):
     query: str
-    history: List[Message] = []
+    session_id: str
     selected_doc_ids: Optional[List[str]] = None
 
 class DriveImportRequest(BaseModel):
@@ -153,7 +164,6 @@ async def import_selected_drive_files(request_data: DriveImportRequest, db: Sess
             while not done:
                 status, done = downloader.next_chunk()
             
-            # Save to Database
             new_doc = DocumentDB(
                 id=str(uuid.uuid4()),
                 document_name=safe_name,
@@ -213,6 +223,32 @@ async def delete_document(doc_id: str, db: Session = Depends(get_db)):
     await process_documents(db)
     return {"status": "success", "message": f"Deleted {doc.document_name} and rebuilt index."}
 
+# --- Chat Session Management Routes ---
+@app.post("/chats")
+async def create_chat_session(db: Session = Depends(get_db)):
+    session_id = str(uuid.uuid4())
+    new_session = ChatSessionDB(id=session_id, title="New Conversation")
+    db.add(new_session)
+    db.commit()
+    return {"status": "success", "session_id": session_id, "title": "New Conversation"}
+
+@app.get("/chats")
+async def get_all_chat_sessions(db: Session = Depends(get_db)):
+    sessions = db.query(ChatSessionDB).order_by(ChatSessionDB.created_at.desc()).all()
+    return {"status": "success", "sessions": sessions}
+
+@app.get("/chats/{session_id}")
+async def get_chat_history(session_id: str, db: Session = Depends(get_db)):
+    messages = db.query(ChatMessageDB).filter(ChatMessageDB.session_id == session_id).order_by(ChatMessageDB.timestamp.asc()).all()
+    return {"status": "success", "messages": messages}
+
+@app.delete("/chats/{session_id}")
+async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
+    db.query(ChatMessageDB).filter(ChatMessageDB.session_id == session_id).delete()
+    db.query(ChatSessionDB).filter(ChatSessionDB.id == session_id).delete()
+    db.commit()
+    return {"status": "success", "message": "Chat session deleted successfully."}
+
 # --- Core RAG Routes ---
 @app.post("/process")
 async def process_documents_route(db: Session = Depends(get_db)):
@@ -221,7 +257,6 @@ async def process_documents_route(db: Session = Depends(get_db)):
 async def process_documents(db: Session):
     docs = db.query(DocumentDB).all()
     if not docs:
-        # If no documents exist, clear the vector DB
         if os.path.exists("./faiss_db"):
             shutil.rmtree("./faiss_db")
         return {"status": "success", "message": "All documents deleted. Vector DB cleared."}
@@ -230,39 +265,44 @@ async def process_documents(db: Session):
     try:
         for doc in docs:
             if os.path.exists(doc.file_path):
-                file_ext = os.path.splitext(doc.file_path)[1].lower()
-                
-                try:
-                    if file_ext == ".pdf":
-                        loader = PyPDFLoader(doc.file_path)
-                    elif file_ext == ".md":
-                        loader = UnstructuredMarkdownLoader(doc.file_path)
-                    else:
-                        loader = TextLoader(doc.file_path, encoding="utf-8")
-                    
-                    loaded_docs = loader.load()
-                    
-                    # Inject Metadata
-                    for d in loaded_docs:
-                        d.metadata["document_id"] = doc.id
-                        d.metadata["source_type"] = doc.source_type
-                    all_documents.extend(loaded_docs)
-                except Exception as e:
-                    print(f"Error loading document {doc.document_name}: {str(e)}")
-                    continue
+                loader = TextLoader(doc.file_path, encoding="utf-8")
+                loaded_docs = loader.load()
+                for d in loaded_docs:
+                    d.metadata["document_id"] = doc.id
+                    d.metadata["source_type"] = doc.source_type
+                all_documents.extend(loaded_docs)
         
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        # --- UPGRADED: Semantic Chunking ---
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        text_splitter = SemanticChunker(
+            embeddings, 
+            breakpoint_threshold_type="percentile"
+        )
         chunks = text_splitter.split_documents(all_documents)
         
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.from_documents(documents=chunks, embedding=embeddings)
         vectorstore.save_local("./faiss_db")
+        
         return {"status": "success", "chunks_created": len(chunks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query")
-async def query_knowledge(request: QueryRequest):
+async def query_knowledge(request: QueryRequest, db: Session = Depends(get_db)):
+    past_messages = db.query(ChatMessageDB).filter(ChatMessageDB.session_id == request.session_id).order_by(ChatMessageDB.timestamp.asc()).all()
+    
+    if not past_messages:
+        session = db.query(ChatSessionDB).filter(ChatSessionDB.id == request.session_id).first()
+        if session:
+            session.title = request.query[:35] + ("..." if len(request.query) > 35 else "")
+            db.commit()
+
+    history_text = "".join([f"{'Human' if msg.role == 'user' else 'Assistant'}: {msg.content}\n" for msg in past_messages[-4:]]) if past_messages else "No previous conversation."
+
+    user_msg = ChatMessageDB(id=str(uuid.uuid4()), session_id=request.session_id, role="user", content=request.query)
+    db.add(user_msg)
+    db.commit()
+
     if not os.path.exists("./faiss_db"):
         return {"query": request.query, "answer": "I have no documents in my knowledge base. Please upload some files!", "sources": []}
 
@@ -273,7 +313,6 @@ async def query_knowledge(request: QueryRequest):
         relevant_docs = []
         is_doc_search = True
 
-        # Handle Document Filtering
         if request.selected_doc_ids is not None:
             if len(request.selected_doc_ids) == 0:
                 is_doc_search = False
@@ -285,10 +324,7 @@ async def query_knowledge(request: QueryRequest):
         else:
             relevant_docs = vectorstore.similarity_search(request.query, k=3)
             context_text = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs]) if relevant_docs else "No relevant context found."
-            
-        history_text = "".join([f"{'Human' if msg.role == 'user' else 'Assistant'}: {msg.content}\n" for msg in request.history[-4:]]) if request.history else "No previous conversation."
 
-        # --- THE FIX: Strict Grounding Prompts ---
         if is_doc_search:
             prompt = f"""
             You are a highly intelligent personal knowledge assistant.
@@ -328,10 +364,21 @@ async def query_knowledge(request: QueryRequest):
         llm = ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"), model="openai/gpt-oss-120b")
         response = llm.invoke(prompt)
         
+        sources_list = [doc.page_content for doc in relevant_docs] if relevant_docs else []
+        ai_msg = ChatMessageDB(
+            id=str(uuid.uuid4()), 
+            session_id=request.session_id, 
+            role="assistant", 
+            content=response.content, 
+            sources=json.dumps(sources_list) 
+        )
+        db.add(ai_msg)
+        db.commit()
+
         return {
             "query": request.query, 
             "answer": response.content, 
-            "sources": [doc.page_content for doc in relevant_docs] if relevant_docs else []
+            "sources": sources_list
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
