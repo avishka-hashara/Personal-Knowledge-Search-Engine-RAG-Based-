@@ -79,7 +79,3 @@ Since the project uses Docker Volumes, most changes are reflected instantly with
 | **New Libraries** (`npm install`, `pip install`) | **`docker-compose up --build`** | Docker needs to update its image layers for new dependencies. |
 | **Env Variables** (`.env`, `docker-compose.yml`) | **`docker-compose up`** | A container restart is required to pull in the new environment state. |
 | **New Data** (Adding files to `backend/data`) | **Click "Process" in UI** | The FAISS index needs to be manually regenerated via the app. |
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
